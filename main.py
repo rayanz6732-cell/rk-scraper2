@@ -11,9 +11,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.getenv("BASE_URL", "https://animepahe.ru")
+BASE_URL  = os.getenv("BASE_URL", "https://animepahe.si")
+PROXY_URL = os.getenv("PROXY_URL", None)
+PROXIES   = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
-# Try multiple strategies to bypass Cloudflare
 scraper = cloudscraper.create_scraper(
     browser={
         "browser": "chrome",
@@ -62,9 +63,8 @@ def get(url: str, **kwargs):
     extra_headers = kwargs.pop("headers", {})
     combined_headers = {**HEADERS, **extra_headers}
 
-    # First try cloudscraper
     try:
-        resp = scraper.get(url, headers=combined_headers, timeout=30, **kwargs)
+        resp = scraper.get(url, headers=combined_headers, timeout=30, proxies=PROXIES, **kwargs)
         if resp.status_code == 200:
             try:
                 return resp.json()
@@ -73,9 +73,8 @@ def get(url: str, **kwargs):
     except Exception:
         pass
 
-    # Fallback to plain requests
     try:
-        resp = requests.get(url, headers=combined_headers, timeout=30, **kwargs)
+        resp = requests.get(url, headers=combined_headers, timeout=30, proxies=PROXIES, **kwargs)
         if resp.status_code == 200:
             try:
                 return resp.json()
@@ -94,7 +93,7 @@ def resolve_m3u8_from_kwik(kwik_url: str) -> str:
         "Referer": BASE_URL + "/",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    resp = scraper.get(kwik_url, headers=headers, timeout=30)
+    resp = scraper.get(kwik_url, headers=headers, timeout=30, proxies=PROXIES)
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Failed to fetch kwik page")
 
@@ -150,7 +149,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "base_url": BASE_URL}
+    return {"status": "ok", "base_url": BASE_URL, "proxy": bool(PROXY_URL)}
 
 
 @app.get("/search")
