@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 import cloudscraper
 from bs4 import BeautifulSoup
 from cachetools import TTLCache
@@ -12,8 +13,15 @@ load_dotenv()
 
 BASE_URL = os.getenv("BASE_URL", "https://animepahe.ru")
 
+# Try multiple strategies to bypass Cloudflare
 scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    browser={
+        "browser": "chrome",
+        "platform": "windows",
+        "desktop": True,
+        "mobile": False
+    },
+    delay=5
 )
 
 search_cache   = TTLCache(maxsize=200, ttl=300)
@@ -23,10 +31,7 @@ sources_cache  = TTLCache(maxsize=500, ttl=180)
 m3u8_cache     = TTLCache(maxsize=500, ttl=180)
 cache_lock     = Lock()
 
-app = FastAPI(
-    title="Animepahe Scraper API",
-    version="2.0.0",
-)
+app = FastAPI(title="Animepahe Scraper API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,28 +41,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": BASE_URL + "/",
+    "Origin": BASE_URL,
+    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Connection": "keep-alive",
+}
+
 
 def get(url: str, **kwargs):
-    headers = {
-        "Referer": BASE_URL + "/",
-        "Accept-Language": "en-US,en;q=0.9",
-        **kwargs.pop("headers", {}),
-    }
-    resp = scraper.get(url, headers=headers, timeout=20, **kwargs)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Upstream error: {url}")
+    extra_headers = kwargs.pop("headers", {})
+    combined_headers = {**HEADERS, **extra_headers}
+
+    # First try cloudscraper
     try:
-        return resp.json()
+        resp = scraper.get(url, headers=combined_headers, timeout=30, **kwargs)
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except Exception:
+                return resp.text
     except Exception:
-        return resp.text
+        pass
+
+    # Fallback to plain requests
+    try:
+        resp = requests.get(url, headers=combined_headers, timeout=30, **kwargs)
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except Exception:
+                return resp.text
+        raise HTTPException(status_code=resp.status_code, detail=f"Upstream error: {url} - Status: {resp.status_code}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Connection error: {str(e)}")
 
 
 def resolve_m3u8_from_kwik(kwik_url: str) -> str:
     headers = {
+        **HEADERS,
         "Referer": BASE_URL + "/",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    resp = scraper.get(kwik_url, headers=headers, timeout=20)
+    resp = scraper.get(kwik_url, headers=headers, timeout=30)
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Failed to fetch kwik page")
 
@@ -74,7 +111,7 @@ def resolve_m3u8_from_kwik(kwik_url: str) -> str:
             array_match = re.search(r"\|([a-zA-Z0-9|_$]+)\|", packed)
             body_match = re.search(r"'([^']+)'\.split\('\\|'\)", packed)
             if array_match and body_match:
-                words = body_match.group(1).split("|") if body_match else []
+                words = body_match.group(1).split("|")
                 unpacked = array_match.group(0)
                 for i, word in enumerate(words):
                     if word:
