@@ -1,7 +1,5 @@
 import os
 import re
-import json
-import execjs
 import cloudscraper
 from bs4 import BeautifulSoup
 from cachetools import TTLCache
@@ -12,16 +10,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Config ────────────────────────────────────────────────────────────────────
 BASE_URL = os.getenv("BASE_URL", "https://animepahe.ru")
-PORT     = int(os.getenv("PORT", 8000))
 
-# ── Cloudscraper client (bypasses Cloudflare) ─────────────────────────────────
 scraper = cloudscraper.create_scraper(
     browser={"browser": "chrome", "platform": "windows", "mobile": False}
 )
 
-# ── Caches ────────────────────────────────────────────────────────────────────
 search_cache   = TTLCache(maxsize=200, ttl=300)
 info_cache     = TTLCache(maxsize=200, ttl=3600)
 episodes_cache = TTLCache(maxsize=500, ttl=600)
@@ -29,10 +23,8 @@ sources_cache  = TTLCache(maxsize=500, ttl=180)
 m3u8_cache     = TTLCache(maxsize=500, ttl=180)
 cache_lock     = Lock()
 
-# ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Animepahe Scraper API",
-    description="Search anime, get episodes, resolve streaming links from Animepahe.",
     version="2.0.0",
 )
 
@@ -44,7 +36,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get(url: str, **kwargs):
     headers = {
@@ -72,47 +63,39 @@ def resolve_m3u8_from_kwik(kwik_url: str) -> str:
 
     html = resp.text
 
-    # Try to find packed JS
-    packed_match = re.search(
-        r"(eval\(function\(p,a,c,k,e,[sd].*?)</script>",
-        html,
-        re.DOTALL,
-    )
-
-    if not packed_match:
-        # Fallback: look for m3u8 directly
-        m3u8_direct = re.search(r"(https?://[^\s\"']+\.m3u8[^\s\"']*)", html)
-        if m3u8_direct:
-            return m3u8_direct.group(1)
-        raise HTTPException(status_code=502, detail="Could not find stream in kwik page")
-
-    packed_js = packed_match.group(1)
-
-    try:
-        ctx = execjs.compile(
-            """
-            var result = '';
-            var document = { createElement: function() { return { set innerHTML(v) { result = v; } }; } };
-            var window = {};
-            %s
-            """ % packed_js.replace("document.write", "document.createElement('div').innerHTML =")
-        )
-        unpacked = ctx.eval("result") if ctx.eval("typeof result") != "undefined" else ""
-    except Exception:
-        unpacked = html
-
-    m3u8_match = re.search(r"source=\\?[\"'](https?://[^\"'\\]+\.m3u8[^\"'\\]*)", unpacked)
+    # Method 1: look for source= pattern
+    m3u8_match = re.search(r"source=\\?[\"'](https?://[^\"'\\]+\.m3u8[^\"'\\]*)", html)
     if m3u8_match:
         return m3u8_match.group(1).replace("\\", "")
 
-    m3u8_any = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", unpacked)
+    # Method 2: unpack p,a,c,k,e,d manually using regex
+    packed_match = re.search(r"eval\(function\(p,a,c,k,e,[sd]\).*?\)\)", html, re.DOTALL)
+    if packed_match:
+        packed = packed_match.group(0)
+        # Extract the strings array and the encoded body
+        try:
+            # Pull the array of replacement strings
+            array_match = re.search(r"\|([a-zA-Z0-9|_$]+)\|", packed)
+            body_match = re.search(r"'([^']+)'\.split\('\\|'\)", packed)
+            if array_match and body_match:
+                words = body_match.group(1).split("|") if body_match else []
+                unpacked = array_match.group(0)
+                for i, word in enumerate(words):
+                    if word:
+                        unpacked = re.sub(r'\b' + str(i) + r'\b', word, unpacked)
+                m3u8_in_unpacked = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", unpacked)
+                if m3u8_in_unpacked:
+                    return m3u8_in_unpacked.group(1)
+        except Exception:
+            pass
+
+    # Method 3: just scan entire page for any m3u8 URL
+    m3u8_any = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", html)
     if m3u8_any:
         return m3u8_any.group(1)
 
     raise HTTPException(status_code=502, detail="Could not extract m3u8 URL from kwik")
 
-
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -123,11 +106,11 @@ def root():
         "endpoints": {
             "GET /search?q=naruto": "Search anime by title",
             "GET /info?session=<session>": "Full anime info",
-            "GET /episodes?session=<session>&page=1": "Episode list (paginated)",
-            "GET /episodes?session=<session>&all=true": "All episodes at once",
-            "GET /sources?anime_session=<s>&episode_session=<s>": "Streaming sources for episode",
-            "GET /m3u8?url=<kwik_url>": "Resolve kwik → direct .m3u8 stream URL",
-            "GET /top?page=1": "Top/airing anime",
+            "GET /episodes?session=<session>&page=1": "Episode list",
+            "GET /episodes?session=<session>&all=true": "All episodes",
+            "GET /sources?anime_session=<s>&episode_session=<s>": "Streaming sources",
+            "GET /m3u8?url=<kwik_url>": "Resolve kwik to direct stream URL",
+            "GET /top?page=1": "Top anime",
             "GET /health": "Health check",
         },
     }
@@ -135,20 +118,11 @@ def root():
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "base_url": BASE_URL,
-        "cache": {
-            "search": len(search_cache),
-            "info": len(info_cache),
-            "episodes": len(episodes_cache),
-            "sources": len(sources_cache),
-        },
-    }
+    return {"status": "ok", "base_url": BASE_URL}
 
 
 @app.get("/search")
-def search(q: str = Query(..., min_length=2, description="Anime title to search")):
+def search(q: str = Query(..., min_length=2)):
     key = q.lower().strip()
     with cache_lock:
         if key in search_cache:
@@ -156,7 +130,7 @@ def search(q: str = Query(..., min_length=2, description="Anime title to search"
 
     data = get(f"{BASE_URL}/api?m=search&q={q}")
     if isinstance(data, str):
-        raise HTTPException(status_code=502, detail="Unexpected response from Animepahe search")
+        raise HTTPException(status_code=502, detail="Unexpected response from search")
 
     results = [
         {
@@ -181,14 +155,14 @@ def search(q: str = Query(..., min_length=2, description="Anime title to search"
 
 
 @app.get("/info")
-def anime_info(session: str = Query(..., description="Anime session slug from search")):
+def anime_info(session: str = Query(...)):
     with cache_lock:
         if session in info_cache:
             return info_cache[session]
 
     html = get(f"{BASE_URL}/anime/{session}")
     if not isinstance(html, str):
-        raise HTTPException(status_code=502, detail="Unexpected non-HTML response")
+        raise HTTPException(status_code=502, detail="Unexpected response")
 
     soup = BeautifulSoup(html, "lxml")
 
@@ -198,10 +172,8 @@ def anime_info(session: str = Query(..., description="Anime session slug from se
         or ""
     )
     jp_title = (soup.find("span", itemprop="alternateName") or {}).get_text(strip=True) or ""
-
     poster_tag = soup.select_one("div.anime-poster img")
     poster = (poster_tag.get("data-src") or poster_tag.get("src") or "") if poster_tag else ""
-
     synopsis_tag = soup.select_one("div.anime-synopsis") or soup.find(itemprop="description")
     synopsis = synopsis_tag.get_text(strip=True) if synopsis_tag else ""
 
@@ -214,14 +186,6 @@ def anime_info(session: str = Query(..., description="Anime session slug from se
             info[label] = value
 
     genres = [a.get_text(strip=True) for a in soup.select("div.anime-genre a, [itemprop='genre']")]
-
-    related = []
-    for el in soup.select("div.anime-related .related-anime-cell a, .anime-recommendation a"):
-        rel_title = el.get("title") or (el.find("img") or {}).get("title") or ""
-        rel_href = el.get("href", "")
-        rel_session = rel_href.split("/anime/")[-1] if "/anime/" in rel_href else ""
-        if rel_title:
-            related.append({"title": rel_title, "session": rel_session})
 
     result = {
         "session": session,
@@ -237,7 +201,6 @@ def anime_info(session: str = Query(..., description="Anime session slug from se
         "season": info.get("season"),
         "studio": info.get("studio"),
         "score": info.get("score"),
-        "related": related,
         "url": f"{BASE_URL}/anime/{session}",
     }
 
@@ -248,9 +211,9 @@ def anime_info(session: str = Query(..., description="Anime session slug from se
 
 @app.get("/episodes")
 def episodes(
-    session: str = Query(..., description="Anime session slug"),
+    session: str = Query(...),
     page: int = Query(1, ge=1),
-    all: bool = Query(False, description="Fetch all episodes across all pages"),
+    all: bool = Query(False),
 ):
     if all:
         return _get_all_episodes(session)
@@ -275,7 +238,6 @@ def _fetch_episode_page(session: str, page: int) -> dict:
         {
             "id": ep.get("id"),
             "number": ep.get("episode"),
-            "number2": ep.get("episode2"),
             "title": ep.get("title") or f"Episode {ep.get('episode')}",
             "snapshot": ep.get("snapshot"),
             "duration": ep.get("duration"),
@@ -317,8 +279,8 @@ def _get_all_episodes(session: str) -> dict:
 
 @app.get("/sources")
 def sources(
-    anime_session: str = Query(..., description="Anime session slug"),
-    episode_session: str = Query(..., description="Episode session from /episodes"),
+    anime_session: str = Query(...),
+    episode_session: str = Query(...),
 ):
     cache_key = f"{anime_session}:{episode_session}"
     with cache_lock:
@@ -341,12 +303,11 @@ def sources(
         seen.add(src)
         server_results.append({
             "url": src,
-            "quality": btn.get("data-res") or btn.get("data-resolution") or "unknown",
+            "quality": btn.get("data-res") or "unknown",
             "fansub": btn.get("data-fansub") or None,
             "audio": btn.get("data-audio") or "jpn",
         })
 
-    # Fallback: scan raw HTML for kwik links
     if not server_results:
         kwik_matches = re.findall(r"https?://kwik\.[a-z]+/e/[a-zA-Z0-9]+", html)
         for url in dict.fromkeys(kwik_matches):
@@ -365,7 +326,7 @@ def sources(
 
 
 @app.get("/m3u8")
-def m3u8(url: str = Query(..., description="Kwik embed URL from /sources")):
+def m3u8(url: str = Query(...)):
     with cache_lock:
         if url in m3u8_cache:
             return m3u8_cache[url]
@@ -411,28 +372,13 @@ def top_anime(page: int = Query(1, ge=1)):
     return {"page": page, "count": len(results), "results": results}
 ```
 
----
-
-## ✅ After Uploading to GitHub
-
-**Deploy to Railway:**
-1. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub repo
-2. Select your repo
-3. Add one environment variable: `BASE_URL` = `https://animepahe.ru`
-4. Deploy — you'll get a live URL in ~60 seconds
-
-**Test it immediately at:**
+**Also update `requirements.txt` → delete everything → paste this** (removed `PyExecJS`):
 ```
-https://your-app.railway.app/docs
-```
-That opens the interactive Swagger UI where you can run every endpoint in the browser without writing any code.
-
----
-
-## 🎬 How to Play an Episode (step by step)
-```
-1. /search?q=your anime name        → copy the "session" value
-2. /episodes?session=XXXX&all=true  → copy the episode "session" value
-3. /sources?anime_session=X&episode_session=Y  → copy a "url" (pick 1080p)
-4. /m3u8?url=https://kwik.si/e/XXX  → copy the "m3u8" value
-5. Open VLC → Media → Open Network Stream → paste the m3u8 URL → Play
+fastapi==0.111.0
+uvicorn==0.30.1
+cloudscraper==1.2.71
+httpx==0.27.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
+cachetools==5.3.3
+python-dotenv==1.0.1
