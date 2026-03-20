@@ -9,8 +9,3 @@
     "restartPolicyMaxRetries": 3
   }
 }
-```
-
-**Edit `Procfile` → delete everything → paste this:**
-```
-web: uvicorn main:app --host 0.0.0.0 --port 8000
