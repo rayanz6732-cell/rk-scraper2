@@ -370,15 +370,4 @@ def top_anime(page: int = Query(1, ge=1)):
             })
 
     return {"page": page, "count": len(results), "results": results}
-```
 
-**Also update `requirements.txt` → delete everything → paste this** (removed `PyExecJS`):
-```
-fastapi==0.111.0
-uvicorn==0.30.1
-cloudscraper==1.2.71
-httpx==0.27.0
-beautifulsoup4==4.12.3
-lxml==5.2.2
-cachetools==5.3.3
-python-dotenv==1.0.1
