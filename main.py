@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = os.getenv("BASE_URL", "https://anitaku.by")
+BASE_URL = os.getenv("BASE_URL", "https://gogoanime3.cc")
 
 search_cache   = TTLCache(maxsize=200, ttl=300)
 info_cache     = TTLCache(maxsize=200, ttl=3600)
@@ -40,7 +40,7 @@ def get_html(url: str) -> str:
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch: {url}")
+            raise HTTPException(status_code=resp.status_code, detail=f"Failed: {url} status={resp.status_code}")
         return resp.text
     except HTTPException:
         raise
@@ -77,24 +77,29 @@ def search(q: str = Query(..., min_length=2)):
         if key in search_cache:
             return search_cache[key]
 
-    html = get_html(f"{BASE_URL}/search.html?keyword={requests.utils.quote(q)}")
+    url = f"{BASE_URL}/search.html?keyword={requests.utils.quote(q)}"
+    html = get_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
     results = []
-    for item in soup.select("ul.items li"):
-        a = item.select_one("p.name a")
-        img = item.select_one("div.img a img")
-        released = item.select_one("p.released")
+
+    # Try multiple selectors since gogoanime changes their HTML
+    items = soup.select("ul.items li") or soup.select("div.last_episodes ul li") or soup.select("div.anime_list_body ul li")
+
+    for item in items:
+        a = item.select_one("p.name a") or item.select_one("div.name a") or item.select_one("a")
+        img = item.select_one("img")
+        released = item.select_one("p.released") or item.select_one("p.year")
         if not a:
             continue
         href = a.get("href", "")
         anime_id = href.strip("/").replace("category/", "")
         results.append({
             "id": anime_id,
-            "title": a.get_text(strip=True),
+            "title": a.get("title") or a.get_text(strip=True),
             "poster": img.get("src", "") if img else "",
             "released": released.get_text(strip=True).replace("Released:", "").strip() if released else None,
-            "url": BASE_URL + href,
+            "url": BASE_URL + href if not href.startswith("http") else href,
         })
 
     response = {"query": q, "count": len(results), "results": results}
@@ -104,7 +109,7 @@ def search(q: str = Query(..., min_length=2)):
 
 
 @app.get("/info")
-def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden")):
+def anime_info(id: str = Query(...)):
     with cache_lock:
         if id in info_cache:
             return info_cache[id]
@@ -112,12 +117,14 @@ def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"
     html = get_html(f"{BASE_URL}/category/{id}")
     soup = BeautifulSoup(html, "html.parser")
 
-    title = (soup.select_one("div.anime_info_body_bg h1") or {}).get_text(strip=True) if soup.select_one("div.anime_info_body_bg h1") else ""
-    poster_tag = soup.select_one("div.anime_info_body_bg img")
+    title_tag = soup.select_one("div.anime_info_body_bg h1") or soup.select_one("h1")
+    title = title_tag.get_text(strip=True) if title_tag else ""
+
+    poster_tag = soup.select_one("div.anime_info_body_bg img") or soup.select_one("div.anime-info img")
     poster = poster_tag.get("src", "") if poster_tag else ""
 
     info = {}
-    for p in soup.select("div.anime_info_body_bg p.type"):
+    for p in soup.select("div.anime_info_body_bg p.type, div.anime-info p"):
         span = p.find("span")
         if span:
             label = span.get_text(strip=True).rstrip(":").lower()
@@ -126,21 +133,16 @@ def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"
 
     genres = [a.get_text(strip=True) for a in soup.select("p.type a[href*='genre']")]
 
-    # Get episode range
-    ep_start = soup.select_one("#episode_page a")
-    ep_end = soup.select_one("#episode_page a:last-child")
+    movie_id_tag = soup.select_one("#movie_id")
+    movie_id = movie_id_tag.get("value") if movie_id_tag else None
+
+    ep_pages = soup.select("#episode_page a")
     total_eps = None
-    if ep_end:
+    if ep_pages:
         try:
-            total_eps = int(ep_end.get("ep_end", 0))
+            total_eps = int(ep_pages[-1].get("ep_end", 0))
         except Exception:
             pass
-
-    # Get anime ID for ajax calls
-    movie_id = None
-    movie_id_tag = soup.select_one("#movie_id")
-    if movie_id_tag:
-        movie_id = movie_id_tag.get("value")
 
     result = {
         "id": id,
@@ -150,7 +152,6 @@ def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"
         "type": info.get("type"),
         "status": info.get("status"),
         "released": info.get("released"),
-        "other_name": info.get("other name"),
         "summary": info.get("plot summary"),
         "total_episodes": total_eps,
         "movie_id": movie_id,
@@ -163,12 +164,11 @@ def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"
 
 
 @app.get("/episodes")
-def episodes(id: str = Query(..., description="Anime ID e.g. naruto-shippuden")):
+def episodes(id: str = Query(...)):
     with cache_lock:
         if id in episodes_cache:
             return episodes_cache[id]
 
-    # First get the movie_id and episode range from the info page
     html = get_html(f"{BASE_URL}/category/{id}")
     soup = BeautifulSoup(html, "html.parser")
 
@@ -177,7 +177,6 @@ def episodes(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"))
         raise HTTPException(status_code=404, detail=f"Anime not found: {id}")
     movie_id = movie_id_tag.get("value")
 
-    # Get episode range
     ep_pages = soup.select("#episode_page a")
     if not ep_pages:
         raise HTTPException(status_code=404, detail="No episodes found")
@@ -185,7 +184,6 @@ def episodes(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"))
     ep_start = ep_pages[0].get("ep_start", "0")
     ep_end = ep_pages[-1].get("ep_end", "0")
 
-    # Fetch episode list via ajax
     ajax_url = f"https://ajax.gogocdn.net/ajax/load-list-episode?ep_start={ep_start}&ep_end={ep_end}&id={movie_id}"
     ajax_html = get_html(ajax_url)
     ajax_soup = BeautifulSoup(ajax_html, "html.parser")
@@ -214,7 +212,7 @@ def episodes(id: str = Query(..., description="Anime ID e.g. naruto-shippuden"))
 
 
 @app.get("/stream")
-def stream(ep_id: str = Query(..., description="Episode ID e.g. naruto-shippuden-episode-1")):
+def stream(ep_id: str = Query(...)):
     with cache_lock:
         if ep_id in sources_cache:
             return sources_cache[ep_id]
@@ -224,14 +222,13 @@ def stream(ep_id: str = Query(..., description="Episode ID e.g. naruto-shippuden
 
     sources = []
 
-    # Get all server links
-    for li in soup.select("div.anime_muti_link ul li"):
+    for li in soup.select("div.anime_muti_link ul li, div.list-server-items li"):
         a = li.select_one("a")
         if not a:
             continue
-        server_name = li.get("class", ["unknown"])[0]
-        data_video = a.get("data-video", "")
-        if data_video:
+        server_name = a.get_text(strip=True) or li.get("class", ["unknown"])[0]
+        data_video = a.get("data-video", "") or a.get("href", "")
+        if data_video and data_video != "#":
             if not data_video.startswith("http"):
                 data_video = "https:" + data_video
             sources.append({
@@ -239,8 +236,7 @@ def stream(ep_id: str = Query(..., description="Episode ID e.g. naruto-shippuden
                 "url": data_video,
             })
 
-    # Also grab the default embed
-    default_embed = soup.select_one("div.play-video iframe")
+    default_embed = soup.select_one("div.play-video iframe, div.anime-video-body iframe")
     if default_embed:
         src = default_embed.get("src", "")
         if src:
