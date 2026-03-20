@@ -252,4 +252,30 @@ def stream(ep_id: str = Query(...)):
 
     with cache_lock:
         sources_cache[ep_id] = result
+
+    @app.get("/debug")
+def debug(url: str = Query(...)):
+    html = get_html(url)
+    soup = BeautifulSoup(html, "html.parser")
+    # Return first 2000 chars of the page and all class names found
+    classes = list(set([c for tag in soup.find_all(class_=True) for c in tag.get("class", [])]))
+    return {
+        "url": url,
+        "title": soup.title.get_text() if soup.title else "",
+        "classes_found": sorted(classes)[:50],
+        "html_preview": html[:2000],
+    }
     return result
+
+@app.get("/debug")
+def debug(url: str = Query(...)):
+    html = get_html(url)
+    soup = BeautifulSoup(html, "html.parser")
+    # Return first 2000 chars of the page and all class names found
+    classes = list(set([c for tag in soup.find_all(class_=True) for c in tag.get("class", [])]))
+    return {
+        "url": url,
+        "title": soup.title.get_text() if soup.title else "",
+        "classes_found": sorted(classes)[:50],
+        "html_preview": html[:2000],
+    }
