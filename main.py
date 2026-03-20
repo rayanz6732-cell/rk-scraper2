@@ -1,7 +1,6 @@
 import os
 import re
 import requests
-import cloudscraper
 from bs4 import BeautifulSoup
 from cachetools import TTLCache
 from threading import Lock
@@ -11,28 +10,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL  = os.getenv("BASE_URL", "https://animepahe.si")
-PROXY_URL = os.getenv("PROXY_URL", None)
-PROXIES   = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-
-scraper = cloudscraper.create_scraper(
-    browser={
-        "browser": "chrome",
-        "platform": "windows",
-        "desktop": True,
-        "mobile": False
-    },
-    delay=5
-)
+BASE_URL = os.getenv("BASE_URL", "https://anitaku.by")
 
 search_cache   = TTLCache(maxsize=200, ttl=300)
 info_cache     = TTLCache(maxsize=200, ttl=3600)
 episodes_cache = TTLCache(maxsize=500, ttl=600)
 sources_cache  = TTLCache(maxsize=500, ttl=180)
-m3u8_cache     = TTLCache(maxsize=500, ttl=180)
 cache_lock     = Lock()
 
-app = FastAPI(title="Animepahe Scraper API", version="2.0.0")
+app = FastAPI(title="Anime Scraper API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,104 +30,36 @@ app.add_middleware(
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "Referer": BASE_URL + "/",
-    "Origin": BASE_URL,
-    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Connection": "keep-alive",
 }
 
 
-def get(url: str, **kwargs):
-    extra_headers = kwargs.pop("headers", {})
-    combined_headers = {**HEADERS, **extra_headers}
-
+def get_html(url: str) -> str:
     try:
-        resp = scraper.get(url, headers=combined_headers, timeout=30, proxies=PROXIES, **kwargs)
-        if resp.status_code == 200:
-            try:
-                return resp.json()
-            except Exception:
-                return resp.text
-    except Exception:
-        pass
-
-    try:
-        resp = requests.get(url, headers=combined_headers, timeout=30, proxies=PROXIES, **kwargs)
-        if resp.status_code == 200:
-            try:
-                return resp.json()
-            except Exception:
-                return resp.text
-        raise HTTPException(status_code=resp.status_code, detail=f"Upstream error: {url} - Status: {resp.status_code}")
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch: {url}")
+        return resp.text
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Connection error: {str(e)}")
 
 
-def resolve_m3u8_from_kwik(kwik_url: str) -> str:
-    headers = {
-        **HEADERS,
-        "Referer": BASE_URL + "/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    resp = scraper.get(kwik_url, headers=headers, timeout=30, proxies=PROXIES)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail="Failed to fetch kwik page")
-
-    html = resp.text
-
-    m3u8_match = re.search(r"source=\\?[\"'](https?://[^\"'\\]+\.m3u8[^\"'\\]*)", html)
-    if m3u8_match:
-        return m3u8_match.group(1).replace("\\", "")
-
-    packed_match = re.search(r"eval\(function\(p,a,c,k,e,[sd]\).*?\)\)", html, re.DOTALL)
-    if packed_match:
-        packed = packed_match.group(0)
-        try:
-            array_match = re.search(r"\|([a-zA-Z0-9|_$]+)\|", packed)
-            body_match = re.search(r"'([^']+)'\.split\('\\|'\)", packed)
-            if array_match and body_match:
-                words = body_match.group(1).split("|")
-                unpacked = array_match.group(0)
-                for i, word in enumerate(words):
-                    if word:
-                        unpacked = re.sub(r'\b' + str(i) + r'\b', word, unpacked)
-                m3u8_in_unpacked = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", unpacked)
-                if m3u8_in_unpacked:
-                    return m3u8_in_unpacked.group(1)
-        except Exception:
-            pass
-
-    m3u8_any = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", html)
-    if m3u8_any:
-        return m3u8_any.group(1)
-
-    raise HTTPException(status_code=502, detail="Could not extract m3u8 URL from kwik")
-
-
 @app.get("/")
 def root():
     return {
-        "name": "Animepahe Scraper API",
-        "version": "2.0.0",
+        "name": "Anime Scraper API",
+        "version": "3.0.0",
+        "source": BASE_URL,
         "docs": "/docs",
         "endpoints": {
-            "GET /search?q=naruto": "Search anime by title",
-            "GET /info?session=<session>": "Full anime info",
-            "GET /episodes?session=<session>&page=1": "Episode list",
-            "GET /episodes?session=<session>&all=true": "All episodes",
-            "GET /sources?anime_session=<s>&episode_session=<s>": "Streaming sources",
-            "GET /m3u8?url=<kwik_url>": "Resolve kwik to direct stream URL",
-            "GET /top?page=1": "Top anime",
+            "GET /search?q=naruto": "Search anime",
+            "GET /info?id=naruto-shippuden": "Anime info",
+            "GET /episodes?id=naruto-shippuden": "Episode list",
+            "GET /stream?ep_id=naruto-shippuden-episode-1": "Streaming sources",
             "GET /health": "Health check",
         },
     }
@@ -149,7 +67,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "base_url": BASE_URL, "proxy": bool(PROXY_URL)}
+    return {"status": "ok", "source": BASE_URL}
 
 
 @app.get("/search")
@@ -159,25 +77,25 @@ def search(q: str = Query(..., min_length=2)):
         if key in search_cache:
             return search_cache[key]
 
-    data = get(f"{BASE_URL}/api?m=search&q={q}")
-    if isinstance(data, str):
-        raise HTTPException(status_code=502, detail="Unexpected response from search")
+    html = get_html(f"{BASE_URL}/search.html?keyword={requests.utils.quote(q)}")
+    soup = BeautifulSoup(html, "html.parser")
 
-    results = [
-        {
-            "id": item.get("id"),
-            "session": item.get("session"),
-            "title": item.get("title"),
-            "type": item.get("type"),
-            "episodes": item.get("episodes"),
-            "status": item.get("status"),
-            "season": item.get("season"),
-            "year": item.get("year"),
-            "score": item.get("score"),
-            "poster": item.get("poster"),
-        }
-        for item in (data.get("data") or [])
-    ]
+    results = []
+    for item in soup.select("ul.items li"):
+        a = item.select_one("p.name a")
+        img = item.select_one("div.img a img")
+        released = item.select_one("p.released")
+        if not a:
+            continue
+        href = a.get("href", "")
+        anime_id = href.strip("/").replace("category/", "")
+        results.append({
+            "id": anime_id,
+            "title": a.get_text(strip=True),
+            "poster": img.get("src", "") if img else "",
+            "released": released.get_text(strip=True).replace("Released:", "").strip() if released else None,
+            "url": BASE_URL + href,
+        })
 
     response = {"query": q, "count": len(results), "results": results}
     with cache_lock:
@@ -186,218 +104,156 @@ def search(q: str = Query(..., min_length=2)):
 
 
 @app.get("/info")
-def anime_info(session: str = Query(...)):
+def anime_info(id: str = Query(..., description="Anime ID e.g. naruto-shippuden")):
     with cache_lock:
-        if session in info_cache:
-            return info_cache[session]
+        if id in info_cache:
+            return info_cache[id]
 
-    html = get(f"{BASE_URL}/anime/{session}")
-    if not isinstance(html, str):
-        raise HTTPException(status_code=502, detail="Unexpected response")
+    html = get_html(f"{BASE_URL}/category/{id}")
+    soup = BeautifulSoup(html, "html.parser")
 
-    soup = BeautifulSoup(html, "lxml")
-
-    title = (
-        (soup.find("span", itemprop="name") or {}).get_text(strip=True)
-        or (soup.find("h1") or {}).get_text(strip=True)
-        or ""
-    )
-    jp_title = (soup.find("span", itemprop="alternateName") or {}).get_text(strip=True) or ""
-    poster_tag = soup.select_one("div.anime-poster img")
-    poster = (poster_tag.get("data-src") or poster_tag.get("src") or "") if poster_tag else ""
-    synopsis_tag = soup.select_one("div.anime-synopsis") or soup.find(itemprop="description")
-    synopsis = synopsis_tag.get_text(strip=True) if synopsis_tag else ""
+    title = (soup.select_one("div.anime_info_body_bg h1") or {}).get_text(strip=True) if soup.select_one("div.anime_info_body_bg h1") else ""
+    poster_tag = soup.select_one("div.anime_info_body_bg img")
+    poster = poster_tag.get("src", "") if poster_tag else ""
 
     info = {}
-    for p in soup.select("div.anime-info p"):
-        strong = p.find("strong")
-        if strong:
-            label = strong.get_text(strip=True).rstrip(":").lower()
-            value = p.get_text(strip=True).replace(strong.get_text(strip=True), "").strip()
+    for p in soup.select("div.anime_info_body_bg p.type"):
+        span = p.find("span")
+        if span:
+            label = span.get_text(strip=True).rstrip(":").lower()
+            value = p.get_text(strip=True).replace(span.get_text(strip=True), "").strip()
             info[label] = value
 
-    genres = [a.get_text(strip=True) for a in soup.select("div.anime-genre a, [itemprop='genre']")]
+    genres = [a.get_text(strip=True) for a in soup.select("p.type a[href*='genre']")]
+
+    # Get episode range
+    ep_start = soup.select_one("#episode_page a")
+    ep_end = soup.select_one("#episode_page a:last-child")
+    total_eps = None
+    if ep_end:
+        try:
+            total_eps = int(ep_end.get("ep_end", 0))
+        except Exception:
+            pass
+
+    # Get anime ID for ajax calls
+    movie_id = None
+    movie_id_tag = soup.select_one("#movie_id")
+    if movie_id_tag:
+        movie_id = movie_id_tag.get("value")
 
     result = {
-        "session": session,
+        "id": id,
         "title": title,
-        "japanese_title": jp_title,
         "poster": poster,
-        "synopsis": synopsis,
         "genres": genres,
         "type": info.get("type"),
         "status": info.get("status"),
-        "total_episodes": info.get("episodes"),
-        "aired": info.get("aired"),
-        "season": info.get("season"),
-        "studio": info.get("studio"),
-        "score": info.get("score"),
-        "url": f"{BASE_URL}/anime/{session}",
+        "released": info.get("released"),
+        "other_name": info.get("other name"),
+        "summary": info.get("plot summary"),
+        "total_episodes": total_eps,
+        "movie_id": movie_id,
+        "url": f"{BASE_URL}/category/{id}",
     }
 
     with cache_lock:
-        info_cache[session] = result
+        info_cache[id] = result
     return result
 
 
 @app.get("/episodes")
-def episodes(
-    session: str = Query(...),
-    page: int = Query(1, ge=1),
-    all: bool = Query(False),
-):
-    if all:
-        return _get_all_episodes(session)
-
-    cache_key = f"{session}:{page}"
+def episodes(id: str = Query(..., description="Anime ID e.g. naruto-shippuden")):
     with cache_lock:
-        if cache_key in episodes_cache:
-            return episodes_cache[cache_key]
+        if id in episodes_cache:
+            return episodes_cache[id]
 
-    result = _fetch_episode_page(session, page)
-    with cache_lock:
-        episodes_cache[cache_key] = result
-    return result
+    # First get the movie_id and episode range from the info page
+    html = get_html(f"{BASE_URL}/category/{id}")
+    soup = BeautifulSoup(html, "html.parser")
 
+    movie_id_tag = soup.select_one("#movie_id")
+    if not movie_id_tag:
+        raise HTTPException(status_code=404, detail=f"Anime not found: {id}")
+    movie_id = movie_id_tag.get("value")
 
-def _fetch_episode_page(session: str, page: int) -> dict:
-    data = get(f"{BASE_URL}/api?m=release&id={session}&sort=episode_asc&page={page}")
-    if isinstance(data, str):
-        raise HTTPException(status_code=502, detail="Unexpected response fetching episodes")
+    # Get episode range
+    ep_pages = soup.select("#episode_page a")
+    if not ep_pages:
+        raise HTTPException(status_code=404, detail="No episodes found")
 
-    eps = [
-        {
-            "id": ep.get("id"),
-            "number": ep.get("episode"),
-            "title": ep.get("title") or f"Episode {ep.get('episode')}",
-            "snapshot": ep.get("snapshot"),
-            "duration": ep.get("duration"),
-            "session": ep.get("session"),
-            "filler": bool(ep.get("filler")),
-            "created_at": ep.get("created_at"),
-        }
-        for ep in (data.get("data") or [])
-    ]
+    ep_start = ep_pages[0].get("ep_start", "0")
+    ep_end = ep_pages[-1].get("ep_end", "0")
 
-    return {
-        "anime_session": session,
-        "total": data.get("total", len(eps)),
-        "per_page": data.get("per_page", 30),
-        "current_page": data.get("current_page", page),
-        "last_page": data.get("last_page", 1),
-        "data": eps,
-    }
+    # Fetch episode list via ajax
+    ajax_url = f"https://ajax.gogocdn.net/ajax/load-list-episode?ep_start={ep_start}&ep_end={ep_end}&id={movie_id}"
+    ajax_html = get_html(ajax_url)
+    ajax_soup = BeautifulSoup(ajax_html, "html.parser")
 
-
-def _get_all_episodes(session: str) -> dict:
-    cache_key = f"{session}:all"
-    with cache_lock:
-        if cache_key in episodes_cache:
-            return episodes_cache[cache_key]
-
-    first = _fetch_episode_page(session, 1)
-    all_eps = list(first["data"])
-
-    for page in range(2, first["last_page"] + 1):
-        page_data = _fetch_episode_page(session, page)
-        all_eps.extend(page_data["data"])
-
-    result = {"anime_session": session, "total": len(all_eps), "data": all_eps}
-    with cache_lock:
-        episodes_cache[cache_key] = result
-    return result
-
-
-@app.get("/sources")
-def sources(
-    anime_session: str = Query(...),
-    episode_session: str = Query(...),
-):
-    cache_key = f"{anime_session}:{episode_session}"
-    with cache_lock:
-        if cache_key in sources_cache:
-            return sources_cache[cache_key]
-
-    watch_url = f"{BASE_URL}/play/{anime_session}/{episode_session}"
-    html = get(watch_url)
-    if not isinstance(html, str):
-        raise HTTPException(status_code=502, detail="Unexpected response from watch page")
-
-    soup = BeautifulSoup(html, "lxml")
-    server_results = []
-    seen = set()
-
-    for btn in soup.select("#pickServers .server-item, div.dropdown-menu a[data-src]"):
-        src = btn.get("data-src") or btn.get("href") or ""
-        if not src or src in seen:
-            continue
-        seen.add(src)
-        server_results.append({
-            "url": src,
-            "quality": btn.get("data-res") or "unknown",
-            "fansub": btn.get("data-fansub") or None,
-            "audio": btn.get("data-audio") or "jpn",
-        })
-
-    if not server_results:
-        kwik_matches = re.findall(r"https?://kwik\.[a-z]+/e/[a-zA-Z0-9]+", html)
-        for url in dict.fromkeys(kwik_matches):
-            server_results.append({"url": url, "quality": "unknown", "fansub": None, "audio": "jpn"})
-
-    result = {
-        "anime_session": anime_session,
-        "episode_session": episode_session,
-        "watch_url": watch_url,
-        "sources": server_results,
-    }
-
-    with cache_lock:
-        sources_cache[cache_key] = result
-    return result
-
-
-@app.get("/m3u8")
-def m3u8(url: str = Query(...)):
-    with cache_lock:
-        if url in m3u8_cache:
-            return m3u8_cache[url]
-
-    stream_url = resolve_m3u8_from_kwik(url)
-    result = {"kwik_url": url, "m3u8": stream_url}
-
-    with cache_lock:
-        m3u8_cache[url] = result
-    return result
-
-
-@app.get("/top")
-def top_anime(page: int = Query(1, ge=1)):
-    html = get(f"{BASE_URL}/?page={page}")
-    if not isinstance(html, str):
-        raise HTTPException(status_code=502, detail="Unexpected response")
-
-    soup = BeautifulSoup(html, "lxml")
-    results = []
-
-    for card in soup.select("div.col-sm-6.col-md-4.col-lg-3"):
-        a = card.find("a")
-        img = card.find("img")
+    eps = []
+    for li in reversed(ajax_soup.select("li")):
+        a = li.select_one("a")
+        ep_num = li.select_one(".name")
+        sub = li.select_one(".cate")
         if not a:
             continue
-        href = a.get("href", "")
-        session = href.split("/anime/")[-1] if "/anime/" in href else ""
-        title = a.get("title") or (img.get("alt") if img else "") or ""
-        poster = (img.get("data-src") or img.get("src") or "") if img else ""
-        score = card.select_one(".score")
-        ep = card.select_one(".ep")
+        href = a.get("href", "").strip()
+        ep_id = href.strip("/")
+        number = ep_num.get_text(strip=True).replace("EP", "").strip() if ep_num else ""
+        eps.append({
+            "id": ep_id,
+            "number": number,
+            "type": sub.get_text(strip=True) if sub else "SUB",
+            "url": BASE_URL + "/" + ep_id,
+        })
 
-        if session:
-            results.append({
-                "session": session,
-                "title": title,
-                "poster": poster,
-                "score": score.get_text(strip=True) if score else None,
-                "episodes_aired": ep.get_text(strip=True) if ep else None,
+    result = {"anime_id": id, "total": len(eps), "episodes": eps}
+    with cache_lock:
+        episodes_cache[id] = result
+    return result
+
+
+@app.get("/stream")
+def stream(ep_id: str = Query(..., description="Episode ID e.g. naruto-shippuden-episode-1")):
+    with cache_lock:
+        if ep_id in sources_cache:
+            return sources_cache[ep_id]
+
+    html = get_html(f"{BASE_URL}/{ep_id}")
+    soup = BeautifulSoup(html, "html.parser")
+
+    sources = []
+
+    # Get all server links
+    for li in soup.select("div.anime_muti_link ul li"):
+        a = li.select_one("a")
+        if not a:
+            continue
+        server_name = li.get("class", ["unknown"])[0]
+        data_video = a.get("data-video", "")
+        if data_video:
+            if not data_video.startswith("http"):
+                data_video = "https:" + data_video
+            sources.append({
+                "server": server_name,
+                "url": data_video,
             })
 
-    return {"page": page, "count": len(results), "results": results}
+    # Also grab the default embed
+    default_embed = soup.select_one("div.play-video iframe")
+    if default_embed:
+        src = default_embed.get("src", "")
+        if src:
+            if not src.startswith("http"):
+                src = "https:" + src
+            sources.insert(0, {"server": "default", "url": src})
+
+    result = {
+        "episode_id": ep_id,
+        "sources": sources,
+        "watch_url": f"{BASE_URL}/{ep_id}",
+    }
+
+    with cache_lock:
+        sources_cache[ep_id] = result
+    return result
