@@ -269,8 +269,3 @@ def stream(ep_id: str = Query(...)):
     with cache_lock:
         sources_cache[ep_id] = result
     return result
-```
-
-Commit, deploy, then once it's online hit:
-```
-https://web-production-9605d.up.railway.app/debug?url=https://gogoanime3.cc/search.html?keyword=naruto
