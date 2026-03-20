@@ -60,6 +60,7 @@ def root():
             "GET /info?id=naruto-shippuden": "Anime info",
             "GET /episodes?id=naruto-shippuden": "Episode list",
             "GET /stream?ep_id=naruto-shippuden-episode-1": "Streaming sources",
+            "GET /debug?url=<url>": "Debug HTML structure",
             "GET /health": "Health check",
         },
     }
@@ -68,6 +69,19 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "source": BASE_URL}
+
+
+@app.get("/debug")
+def debug(url: str = Query(...)):
+    html = get_html(url)
+    soup = BeautifulSoup(html, "html.parser")
+    classes = list(set([c for tag in soup.find_all(class_=True) for c in tag.get("class", [])]))
+    return {
+        "url": url,
+        "title": soup.title.get_text() if soup.title else "",
+        "classes_found": sorted(classes)[:50],
+        "html_preview": html[:3000],
+    }
 
 
 @app.get("/search")
@@ -82,9 +96,11 @@ def search(q: str = Query(..., min_length=2)):
     soup = BeautifulSoup(html, "html.parser")
 
     results = []
-
-    # Try multiple selectors since gogoanime changes their HTML
-    items = soup.select("ul.items li") or soup.select("div.last_episodes ul li") or soup.select("div.anime_list_body ul li")
+    items = (
+        soup.select("ul.items li")
+        or soup.select("div.last_episodes ul li")
+        or soup.select("div.anime_list_body ul li")
+    )
 
     for item in items:
         a = item.select_one("p.name a") or item.select_one("div.name a") or item.select_one("a")
@@ -252,30 +268,9 @@ def stream(ep_id: str = Query(...)):
 
     with cache_lock:
         sources_cache[ep_id] = result
-
-    @app.get("/debug")
-def debug(url: str = Query(...)):
-    html = get_html(url)
-    soup = BeautifulSoup(html, "html.parser")
-    # Return first 2000 chars of the page and all class names found
-    classes = list(set([c for tag in soup.find_all(class_=True) for c in tag.get("class", [])]))
-    return {
-        "url": url,
-        "title": soup.title.get_text() if soup.title else "",
-        "classes_found": sorted(classes)[:50],
-        "html_preview": html[:2000],
-    }
     return result
+```
 
-@app.get("/debug")
-def debug(url: str = Query(...)):
-    html = get_html(url)
-    soup = BeautifulSoup(html, "html.parser")
-    # Return first 2000 chars of the page and all class names found
-    classes = list(set([c for tag in soup.find_all(class_=True) for c in tag.get("class", [])]))
-    return {
-        "url": url,
-        "title": soup.title.get_text() if soup.title else "",
-        "classes_found": sorted(classes)[:50],
-        "html_preview": html[:2000],
-    }
+Commit, deploy, then once it's online hit:
+```
+https://web-production-9605d.up.railway.app/debug?url=https://gogoanime3.cc/search.html?keyword=naruto
