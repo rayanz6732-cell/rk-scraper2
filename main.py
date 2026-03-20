@@ -63,18 +63,14 @@ def resolve_m3u8_from_kwik(kwik_url: str) -> str:
 
     html = resp.text
 
-    # Method 1: look for source= pattern
     m3u8_match = re.search(r"source=\\?[\"'](https?://[^\"'\\]+\.m3u8[^\"'\\]*)", html)
     if m3u8_match:
         return m3u8_match.group(1).replace("\\", "")
 
-    # Method 2: unpack p,a,c,k,e,d manually using regex
     packed_match = re.search(r"eval\(function\(p,a,c,k,e,[sd]\).*?\)\)", html, re.DOTALL)
     if packed_match:
         packed = packed_match.group(0)
-        # Extract the strings array and the encoded body
         try:
-            # Pull the array of replacement strings
             array_match = re.search(r"\|([a-zA-Z0-9|_$]+)\|", packed)
             body_match = re.search(r"'([^']+)'\.split\('\\|'\)", packed)
             if array_match and body_match:
@@ -89,7 +85,6 @@ def resolve_m3u8_from_kwik(kwik_url: str) -> str:
         except Exception:
             pass
 
-    # Method 3: just scan entire page for any m3u8 URL
     m3u8_any = re.search(r"(https?://[^\s\"'\\]+\.m3u8[^\s\"'\\]*)", html)
     if m3u8_any:
         return m3u8_any.group(1)
@@ -370,4 +365,3 @@ def top_anime(page: int = Query(1, ge=1)):
             })
 
     return {"page": page, "count": len(results), "results": results}
-
